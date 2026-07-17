@@ -1,0 +1,6 @@
+{
+  "token": "REPLACE_WITH_BOT_TOKEN_FROM_BOTFATHER",
+  "allowed_user_ids": [
+    123456789
+  ]
+}

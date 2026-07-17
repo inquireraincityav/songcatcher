@@ -1,0 +1,84 @@
+#!/bin/bash
+# songcatcher — CLI wrapper around the local daemon's HTTP API.
+#
+# Usage:
+#   songcatcher <url-or-query>
+#   songcatcher --important <url-or-query>
+#   songcatcher --queue
+#   songcatcher --cancel <job_id>
+
+set -euo pipefail
+
+API="http://127.0.0.1:7878"
+
+usage() {
+    cat <<EOF
+Usage:
+  songcatcher [--important] [--set] <url-or-query>
+  songcatcher --queue
+  songcatcher --cancel <job_id>
+  songcatcher --status <job_id>
+
+Flags:
+  --important   Jump the queue ahead of pending normal jobs
+  --set         Treat the input as a DJ set: download whole and split into tracks
+EOF
+    exit 1
+}
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+important="false"
+split_as_set="false"
+
+# Top-level commands
+case "$1" in
+    --queue)
+        curl -s "$API/queue" | /usr/bin/python3 -m json.tool
+        exit 0
+        ;;
+    --cancel)
+        [[ $# -lt 2 ]] && usage
+        curl -s -X DELETE "$API/jobs/$2" | /usr/bin/python3 -m json.tool
+        exit 0
+        ;;
+    --status)
+        [[ $# -lt 2 ]] && usage
+        curl -s "$API/jobs/$2" | /usr/bin/python3 -m json.tool
+        exit 0
+        ;;
+    --help|-h)
+        usage
+        ;;
+esac
+
+# Multi-flag parse for enqueue (--important and --set can be combined, any order)
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --important) important="true"; shift ;;
+        --set)       split_as_set="true"; shift ;;
+        *)           echo "Unknown flag: $1"; usage ;;
+    esac
+done
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+input="$*"
+payload=$(/usr/bin/python3 -c "
+import json,sys
+print(json.dumps({
+    'input': sys.argv[1],
+    'important': sys.argv[2]=='true',
+    'split_as_set': sys.argv[3]=='true',
+}))
+" "$input" "$important" "$split_as_set")
+
+response=$(curl -s -X POST "$API/enqueue" \
+    -H 'Content-Type: application/json' \
+    -d "$payload")
+
+echo "$response" | /usr/bin/python3 -m json.tool

@@ -1,0 +1,154 @@
+#!/bin/bash
+# songcatcher-split — split an existing MP3 into tracks using the same cascade
+# the daemon uses (chapters → description → 1001tracklists → ShazamIO), without
+# re-downloading. Reuses the daemon's helper functions.
+#
+# Usage:
+#   songcatcher-split <existing.mp3> <source-url>     # full cascade
+#   songcatcher-split <existing.mp3>                  # ShazamIO only
+#   songcatcher-split <existing.mp3> --delete-original <url>  # delete src on success
+
+set -euo pipefail
+
+APP_DIR="$HOME/Library/Application Support/Songcatcher"
+PYTHON="$APP_DIR/venv/bin/python"
+
+if [[ $# -lt 1 ]]; then
+    cat <<EOF
+Usage:
+  songcatcher-split <existing.mp3> [<source-url>] [--delete-original]
+EOF
+    exit 1
+fi
+
+MP3="$1"; shift
+URL=""
+DELETE_ORIGINAL=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --delete-original) DELETE_ORIGINAL=1; shift ;;
+        *) URL="$1"; shift ;;
+    esac
+done
+
+if [[ ! -f "$MP3" ]]; then
+    echo "Not a file: $MP3" >&2
+    exit 1
+fi
+
+"$PYTHON" - "$MP3" "$URL" "$DELETE_ORIGINAL" <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.expanduser("~/Library/Application Support/Songcatcher"))
+from songcatcherd import (
+    MUSIC_DIR,
+    Segment,
+    extract_chapter_segments,
+    extract_description_segments,
+    find_1001_tracklist,
+    fetch_1001_tracklist,
+    shazam_scan,
+    fill_unidentified_gaps,
+    ffmpeg_split_stream_copy,
+    tag_mp3,
+    sanitize_filename,
+    unique_path,
+    _fmt_hms,
+    UNIDENTIFIED_MIN_GAP_SEC,
+)
+
+mp3 = Path(sys.argv[1])
+url = sys.argv[2] or None
+delete_original = sys.argv[3] == "1"
+
+# Probe duration via ffprobe (always need it)
+res = subprocess.run(
+    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+     "default=noprint_wrappers=1:nokey=1", str(mp3)],
+    capture_output=True, text=True, timeout=15,
+)
+duration = float(res.stdout.strip())
+print(f"Duration: {duration:.0f} s ({duration/60:.1f} min)")
+
+info = {}
+set_name = mp3.stem  # default to filename without extension
+if url:
+    print(f"Probing source URL...")
+    probe = subprocess.run(
+        ["yt-dlp", "-J", "--no-warnings", "--no-playlist", url],
+        capture_output=True, text=True, timeout=60,
+    )
+    if probe.returncode == 0:
+        info = json.loads(probe.stdout)
+        if info.get("_type") == "playlist":
+            info = (info.get("entries") or [{}])[0]
+        set_name = info.get("title") or set_name
+    else:
+        print(f"  yt-dlp probe failed; proceeding without metadata")
+
+print(f"Set name: {set_name!r}")
+sanitized_set_name = sanitize_filename(set_name)
+
+# Cascade
+segments = []
+if info:
+    segments = extract_chapter_segments(info)
+    if segments:
+        print(f"Source 1 — chapters: {len(segments)} segments")
+if not segments and info:
+    segments = extract_description_segments(info.get("description") or "", duration)
+    if segments:
+        print(f"Source 2 — description timestamps: {len(segments)} segments")
+if not segments:
+    print(f"Source 3 — 1001tracklists lookup...")
+    tl_url = find_1001_tracklist(set_name)
+    if tl_url:
+        print(f"  match: {tl_url}")
+        segments = fetch_1001_tracklist(tl_url, duration)
+        if segments:
+            print(f"  parsed {len(segments)} segments")
+    else:
+        print(f"  no match")
+if not segments:
+    print(f"Source 4 — ShazamIO scan (slow, ~{duration:.0f} s of audio = ~{duration/60:.0f} min processing)...")
+    segments = shazam_scan(mp3, duration)
+    print(f"  Shazam identified {len(segments)} segments")
+
+if not segments:
+    print("No tracklist could be derived from any source. Nothing to do.")
+    sys.exit(2)
+
+# Output folder
+set_dir = unique_path(MUSIC_DIR, sanitized_set_name)
+set_dir.mkdir(parents=True, exist_ok=False)
+print(f"Writing to: {set_dir}")
+
+gaps = fill_unidentified_gaps(segments, duration)
+width = max(2, len(str(len(segments))))
+
+for i, seg in enumerate(segments, start=1):
+    track_title = seg.display_title()
+    fname = f"{i:0{width}d} - {sanitize_filename(track_title)}.mp3"
+    dest = unique_path(set_dir, fname)
+    ffmpeg_split_stream_copy(mp3, seg.start, seg.end, dest)
+    tag_mp3(dest, title=seg.title, artist=seg.artist, album=set_name,
+            track_num=i, total_tracks=len(segments))
+    print(f"  ✓ {dest.name}")
+
+if gaps:
+    unident = set_dir / "_unidentified"
+    unident.mkdir(parents=True, exist_ok=True)
+    for start, end in gaps:
+        dest = unident / f"{_fmt_hms(start)}_{_fmt_hms(end)}.mp3"
+        try:
+            ffmpeg_split_stream_copy(mp3, start, end, dest)
+            print(f"  ? {dest.relative_to(set_dir)}")
+        except Exception as e:
+            print(f"  ! gap {start}-{end} failed: {e}")
+
+print(f"\nDone: {len(segments)} tracks + {len(gaps)} unidentified gaps")
+if delete_original:
+    mp3.unlink()
+    print(f"Deleted original: {mp3}")
+PY

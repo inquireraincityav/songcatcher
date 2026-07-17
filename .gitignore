@@ -1,0 +1,60 @@
+# --- macOS ---
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+Icon?
+Thumbs.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyo
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Runtime data (never track) ---
+# The installed/ snapshot mirrors the deployed files but excludes runtime state
+# and secrets. These patterns keep the runtime bits out even if they end up in
+# the working tree by accident.
+Library/
+LaunchAgents/
+Logs/
+Application Support/
+work/
+state.db
+telegram.json
+!installed/app_support/telegram.json.example  # keep the template
+
+# --- Local secrets (never commit) ---
+*.token
+*.secret
+*_credentials.json
+.env.local
+
+# --- Output ---
+# Music downloads and split folders are user data, not source.
+Music/
+_unidentified/
+_missing/
+*.mp3
+*.m4a
+*.wav
+*.part
